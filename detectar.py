@@ -7,7 +7,7 @@ H = np.array(cal["H"])
 rotacion = cal["rotacion"]
 centros_px = cal["centros_px"]
 
-FUENTE = 2  # 0 para la webcam, a priori 2 una externa
+FUENTE = 4  # 0 para la webcam, a priori 2 una externa
 
 cap = cv2.VideoCapture(FUENTE, cv2.CAP_V4L2)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))

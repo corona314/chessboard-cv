@@ -2,7 +2,7 @@ import cv2
 import json
 import numpy as np
 
-FUENTE = 3 # 0 o 2
+FUENTE = 4 # 0 o 2
 N_FRAMES = 30
 pattern = (7, 7)
 flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE

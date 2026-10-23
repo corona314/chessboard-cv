@@ -1,223 +1,477 @@
+
 import os
 import time
+import queue
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import pyvirtualcam
+
 import cv2
 import chess
 import chess.engine
+import pyvirtualcam
+
 from vision import VisionTablero
 
-# ---------------- Configuración ----------------
-FUENTE = 3
-PUERTO_STREAM = 8080
+
+# =========================
+# CONFIGURACIÓN
+# =========================
+
+FUENTE = 2
 TIEMPO_MOTOR = 0.3
-COLOR_ROBOT = chess.WHITE              # el bando que juega el brazo
-VERDE = (0, 255, 0)                    # BGR: origen
-ROJO = (0, 0, 255)                     # BGR: destino
+COLOR_ROBOT = chess.WHITE
+
+VERDE = (0, 255, 0)
+AZUL = (255, 0, 0)
+ROJO = (0, 0, 255)
+MORADO = (255, 0, 255)
+
 USAR_BOT_JAVA = False
 
+ANCHO = 640
+ALTO = 480
+FPS = 30
+
+DISPOSITIVO_VIRTUAL = "/dev/video0"
+
+
+# =========================
+# MOTOR DE AJEDREZ
+# =========================
+
 if USAR_BOT_JAVA:
-    PROYECTO = Path.home() / "Projects" / "chessBot" / "chess-bot"
-    dependencias = (PROYECTO / "target" / "classpath.txt").read_text().strip()
-    classpath = os.pathsep.join([str(PROYECTO / "target" / "classes"), dependencias])
-    MOTOR = ["java", "-cp", classpath, "com.example.UciMain"]
+    ruta_classpath = (
+        Path.home()
+        / "Projects/chessBot/chess-bot/target/classpath.txt"
+    )
+
+    with open(ruta_classpath, "r", encoding="utf-8") as f:
+        classpath = f.read().strip()
+
+    MOTOR = [
+        "java",
+        "-cp",
+        classpath,
+        "com.example.UciMain",
+    ]
 else:
     MOTOR = "stockfish"
 
-# ---------------- Emisor MJPEG por HTTP ----------------
-class Emisor:
-    def __init__(self, puerto=8080):
-        self.jpg = None
-        emisor = self
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path != "/video":
-                    self.send_error(404)
-                    return
-                self.send_response(200)
-                self.send_header("Content-Type",
-                                 "multipart/x-mixed-replace; boundary=frame")
-                self.end_headers()
-                try:
-                    while True:
-                        if emisor.jpg is not None:
-                            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n")
-                            self.wfile.write(emisor.jpg)
-                            self.wfile.write(b"\r\n")
-                        time.sleep(1 / 30)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-
-            def log_message(self, *a):
-                pass
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", puerto), Handler)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-
-    def enviar(self, frame):
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if ok:
-            self.jpg = buf.tobytes()
-
-    def cerrar(self):
-        self.server.shutdown()
-
-
-# ---------------- Utilidades ----------------
 def calcular_jugada(engine, board):
-    """Solo calcula si es el turno del brazo; en mi turno devuelve None."""
-    if board.is_game_over() or board.turn != COLOR_ROBOT:
+    """Calcula la jugada del robot cuando le toca jugar."""
+    if board.is_game_over():
         return None
-    return engine.play(board, chess.engine.Limit(time=TIEMPO_MOTOR)).move
 
-
-def pedir_jugada(board):
-    txt = input("Jugada (UCI ej. e7e5): ").strip()
-    try:
-        return board.parse_uci(txt)
-    except ValueError:
+    if board.turn != COLOR_ROBOT:
         return None
+
+    resultado = engine.play(
+        board,
+        chess.engine.Limit(time=TIEMPO_MOTOR),
+    )
+
+    return resultado.move
 
 
 def nombre_color(color):
-    return "blancas" if color == chess.WHITE else "negras"
+    return "Blancas" if color == chess.WHITE else "Negras"
 
 
-# ---------------- Inicio ----------------
-vision = VisionTablero("calibracion.json")
-board = chess.Board()
-engine = chess.engine.SimpleEngine.popen_uci(MOTOR)
+def mostrar_estado(board, mejor, propuesta):
+    print("\n========== ESTADO ==========")
+    print(board)
+    print(f"\nTurno: {nombre_color(board.turn)}")
 
-mejor = calcular_jugada(engine, board)   # None si empieza el humano
-propuesta = None
+    if board.is_game_over():
+        print(f"Partida terminada: {board.result()}")
+    else:
+        print("Partida en curso.")
 
-cap = cv2.VideoCapture(FUENTE, cv2.CAP_V4L2)
-cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-if not cap.isOpened():
-    raise RuntimeError(f"No se puede abrir la fuente: {FUENTE}")
+    print(
+        "Jugada sugerida por el motor:",
+        board.uci(mejor) if mejor else "ninguna",
+    )
+
+    print(
+        "Jugada detectada:",
+        board.uci(propuesta) if propuesta else "ninguna",
+    )
+
+    print("============================\n")
 
 
-cam_virtual = pyvirtualcam.Camera(
-    width=640,
-    height=480,
-    fps=30,
-    device="/dev/video0",
-    fmt=pyvirtualcam.PixelFormat.BGR
-)
+def mostrar_ayuda():
+    print("""
+Comandos disponibles:
 
-emisor = Emisor(PUERTO_STREAM)
-print(f"Stream con overlay en http://127.0.0.1:{PUERTO_STREAM}/video")
-print(f"Brazo juega con {nombre_color(COLOR_ROBOT)}.")
-print("ESPACIO=jugada del robot hecha | g=snapshot antes | d=detectar jugada humana | "
-      "y=confirmar | m=jugada manual | u=deshacer | x=reiniciar | q/ESC=salir")
+  g  - Guardar imagen ANTES de realizar la jugada
+  d  - Detectar la jugada comparando con la imagen guardada
+  y  - Confirmar la jugada detectada
+  m  - Introducir manualmente una jugada UCI
+  espacio - Confirmar que el robot ha ejecutado su jugada
+  u  - Deshacer la última jugada
+  x  - Reiniciar la partida
+  e  - Mostrar el estado de la partida
+  h  - Mostrar esta ayuda
+  q  - Salir
 
-mensaje = "Tu turno: pulsa g, haz tu jugada y pulsa d" if mejor is None else ""
+Ejemplos de jugadas UCI:
+  e2e4
+  g1f3
+  e7e5
+""")
+
+
+# =========================
+# ENTRADA POR TERMINAL
+# =========================
+
+comandos = queue.Queue()
+
+
+def consola():
+    """
+    Lee los comandos en un hilo independiente.
+    No modifica directamente el tablero, el motor ni la visión:
+    los comandos se procesan en el hilo principal.
+    """
+    mostrar_ayuda()
+
+    while True:
+        try:
+            cmd = input("Comando> ").strip().lower()
+
+            if not cmd:
+                continue
+
+            if cmd in ("m", "manual"):
+                jugada = input(
+                    "Introduce la jugada UCI (por ejemplo e2e4): "
+                ).strip().lower()
+
+                comandos.put(("m", jugada))
+                continue
+
+            if cmd in ("espacio", "robot"):
+                comandos.put(("robot", None))
+                continue
+
+            if cmd == "q":
+                comandos.put(("q", None))
+                return
+
+            comandos.put((cmd, None))
+
+        except (EOFError, KeyboardInterrupt):
+            comandos.put(("q", None))
+            return
+
+
+# =========================
+# PROGRAMA PRINCIPAL
+# =========================
+
+vision = None
+engine = None
+cap = None
+cam_virtual = None
 
 try:
-    while True:
+    # Inicializar visión y tablero
+    vision = VisionTablero("calibracion.json")
+    board = chess.Board()
+
+    # Iniciar motor
+    print("Iniciando motor...")
+    engine = chess.engine.SimpleEngine.popen_uci(MOTOR)
+    print("Motor iniciado.")
+
+    # Abrir cámara física
+    print(f"Abriendo cámara física: /dev/video{FUENTE}")
+
+    cap = cv2.VideoCapture(FUENTE, cv2.CAP_V4L2)
+
+    if not cap.isOpened():
+        raise RuntimeError(
+            f"No se pudo abrir la cámara física /dev/video{FUENTE}"
+        )
+
+    # Reducir latencia de captura
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(
+        cv2.CAP_PROP_FOURCC,
+        cv2.VideoWriter_fourcc(*"MJPG"),
+    )
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    # Iniciar cámara virtual
+    print(f"Abriendo cámara virtual: {DISPOSITIVO_VIRTUAL}")
+
+    cam_virtual = pyvirtualcam.Camera(
+        width=ANCHO,
+        height=ALTO,
+        fps=FPS,
+        device=DISPOSITIVO_VIRTUAL,
+        fmt=pyvirtualcam.PixelFormat.BGR,
+    )
+
+    print(f"Cámara virtual activa: {cam_virtual.device}")
+
+    # Estado inicial
+    mejor = calcular_jugada(engine, board)
+    propuesta = None
+    salir = False
+
+    # Última imagen original, sin cuadrados ni texto
+    limpio = None
+
+    # Iniciar lectura de terminal
+    hilo_consola = threading.Thread(
+        target=consola,
+        daemon=True,
+    )
+    hilo_consola.start()
+
+    print("\nSistema listo.")
+    print("La imagen virtual no incluye texto.")
+    print("Escribe 'h' en la terminal para ver los comandos.\n")
+
+    while not salir:
+        # Capturar imagen
         ok, frame = cap.read()
+
         if not ok:
-            break
+            print("Aviso: no se pudo leer un fotograma.")
+            time.sleep(0.05)
+            continue
 
-        limpio = frame.copy()   # sin overlay: para snapshot y detección
+        # Ajustar tamaño y conservar imagen original
+        limpio = cv2.resize(frame, (ANCHO, ALTO))
+        limpio = limpio.copy()
 
-        # Overlay de la jugada del robot (solo en su turno)
-        if mejor is not None:
-            vision.pintar(frame, mejor.from_square, VERDE)
-            vision.pintar(frame, mejor.to_square, ROJO)
-        # Overlay de la jugada humana detectada (pendiente de confirmar)
-        if propuesta is not None:
-            vision.pintar(frame, propuesta.from_square, (255, 200, 0))
-            vision.pintar(frame, propuesta.to_square, (255, 0, 200))
+        # Procesar los comandos pendientes en el hilo principal
+        while True:
+            try:
+                cmd, dato = comandos.get_nowait()
+            except queue.Empty:
+                break
 
-        # Lo que ve LeLab: cámara + cuadrados, sin texto
-        emisor.enviar(frame)
+            if cmd == "q":
+                salir = True
+                break
 
-        # Texto solo para la ventana local
-        if board.is_game_over():
-            info = f"Fin de partida: {board.result()}"
-        elif mejor is not None:
-            info = (f"Robot ({nombre_color(board.turn)}): "
-                    f"{chess.square_name(mejor.from_square)} -> "
-                    f"{chess.square_name(mejor.to_square)}")
-        else:
-            info = f"Tu turno ({nombre_color(board.turn)})"
-        cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                    (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, mensaje, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                    (200, 200, 200), 1, cv2.LINE_AA)
+            elif cmd == "h":
+                mostrar_ayuda()
 
-        cam_virtual.send(frame)
-        emisor.enviar(frame)
+            elif cmd == "e":
+                mostrar_estado(board, mejor, propuesta)
 
+            elif cmd == "g":
+                try:
+                    vision.guardar_antes(limpio.copy())
+                    print("Imagen anterior guardada.")
+                except Exception as exc:
+                    print(f"Error al guardar la imagen: {exc}")
 
-        cv2.imshow("Tablero + motor", frame)
-        tecla = cv2.waitKey(1) & 0xFF
+            elif cmd == "d":
+                try:
+                    if getattr(vision, "antes", None) is None:
+                        print("Primero guarda la imagen con el comando g.")
+                        continue
 
-        if tecla in (ord('q'), 27):
-            break
+                    mv, confianza = vision.detectar(
+                        board,
+                        limpio.copy(),
+                    )
 
-        elif tecla == ord(' ') and mejor is not None:
-            captura = board.is_capture(mejor)
-            print(f"Robot: {board.san(mejor)} "
-                  f"({mejor.uci()}){'  [CAPTURA: retirar pieza antes]' if captura else ''}")
-            board.push(mejor)
-            mejor = calcular_jugada(engine, board)   # None: ahora toca al humano
-            propuesta = None
-            vision.antes = None
-            mensaje = "Brazo fuera; pulsa g, haz tu jugada y pulsa d"
+                    if mv is None:
+                        print("No se pudo detectar ninguna jugada.")
+                        propuesta = None
+                    else:
+                        propuesta = mv
 
-        elif tecla == ord('g'):
-            vision.guardar_antes(limpio)
-            mensaje = "Snapshot guardado. Haz tu jugada y pulsa d"
+                        try:
+                            san = board.san(mv)
+                        except Exception:
+                            san = board.uci(mv)
 
-        elif tecla == ord('d'):
-            mv, res = vision.detectar(board, limpio)
-            if mv is None:
-                mensaje = f"No detectada: {res}"
-                print(mensaje + ". Usa 'm' para introducirla.")
-            else:
-                propuesta = mv
-                mensaje = f"Detectada {board.san(mv)} (conf {res:.0f}). y=confirmar"
-                print(mensaje)
+                        print(
+                            f"Jugada detectada: {san} "
+                            f"({board.uci(mv)})"
+                        )
 
-        elif tecla == ord('y') and propuesta is not None:
-            board.push(propuesta)
-            propuesta = None
-            vision.antes = None
-            mejor = calcular_jugada(engine, board)   # respuesta del robot
-            mensaje = "Jugada aplicada"
+                        if confianza is not None:
+                            print(f"Resultado de detección: {confianza}")
 
-        elif tecla == ord('m'):
-            mv = pedir_jugada(board)
-            if mv is None:
-                print("Jugada no válida.")
-            else:
-                board.push(mv)
+                except Exception as exc:
+                    print(f"Error durante la detección: {exc}")
+
+            elif cmd == "y":
+                if propuesta is None:
+                    print("No hay ninguna jugada detectada para confirmar.")
+                    continue
+
+                if propuesta not in board.legal_moves:
+                    print("La jugada detectada ya no es legal.")
+                    propuesta = None
+                    continue
+
+                san = board.san(propuesta)
+                board.push(propuesta)
+
+                print(f"Jugada confirmada: {san}")
+
                 propuesta = None
                 vision.antes = None
                 mejor = calcular_jugada(engine, board)
 
-        elif tecla == ord('u') and board.move_stack:
-            board.pop()
-            propuesta = None
-            vision.antes = None
-            mejor = calcular_jugada(engine, board)
+                if mejor:
+                    print(
+                        "El motor propone:",
+                        board.uci(mejor),
+                    )
 
-        elif tecla == ord('x'):
-            board.reset()
-            propuesta = None
-            vision.antes = None
-            mejor = calcular_jugada(engine, board)
-            mensaje = ""
+            elif cmd == "robot":
+                if mejor is None:
+                    print("No hay ninguna jugada del robot pendiente.")
+                    continue
+
+                if mejor not in board.legal_moves:
+                    print("La jugada del motor ya no es legal.")
+                    mejor = calcular_jugada(engine, board)
+                    continue
+
+                san = board.san(mejor)
+                board.push(mejor)
+
+                print(f"Jugada del robot confirmada: {san}")
+
+                propuesta = None
+                vision.antes = None
+                mejor = calcular_jugada(engine, board)
+
+                if mejor:
+                    print(
+                        "Siguiente jugada del motor:",
+                        board.uci(mejor),
+                    )
+
+            elif cmd == "m":
+                if not dato:
+                    print("No se ha introducido ninguna jugada.")
+                    continue
+
+                try:
+                    mv = board.parse_uci(dato)
+
+                    if mv not in board.legal_moves:
+                        print("La jugada no es legal en esta posición.")
+                        continue
+
+                    san = board.san(mv)
+                    board.push(mv)
+
+                    print(f"Jugada manual registrada: {san}")
+
+                    propuesta = None
+                    vision.antes = None
+                    mejor = calcular_jugada(engine, board)
+
+                    if mejor:
+                        print(
+                            "El motor propone:",
+                            board.uci(mejor),
+                        )
+
+                except ValueError:
+                    print(
+                        "Formato UCI incorrecto o jugada ilegal. "
+                        "Ejemplo válido: e2e4"
+                    )
+
+            elif cmd == "u":
+                if not board.move_stack:
+                    print("No hay jugadas que deshacer.")
+                    continue
+
+                deshecha = board.pop()
+                print(f"Jugada deshecha: {deshecha.uci()}")
+
+                propuesta = None
+                vision.antes = None
+                mejor = calcular_jugada(engine, board)
+
+                if mejor:
+                    print(
+                        "El motor propone:",
+                        board.uci(mejor),
+                    )
+
+            elif cmd == "x":
+                board.reset()
+                propuesta = None
+                vision.antes = None
+                mejor = calcular_jugada(engine, board)
+
+                print("Partida reiniciada.")
+
+                if mejor:
+                    print(
+                        "El motor propone:",
+                        board.uci(mejor),
+                    )
+
+            else:
+                print(f"Comando desconocido: {cmd!r}. Escribe h para ayuda.")
+
+        if salir:
+            break
+
+        # Crear salida visual a partir de la imagen limpia.
+        # No se escribe ningún texto sobre esta imagen.
+
+        # Crear imagen limpia de salida, sin texto
+        salida = limpio.copy()
+
+        # Jugada sugerida por el motor: verde
+        if mejor is not None:
+            vision.pintar(salida, mejor.from_square, ROJO, opacidad=0.35)
+            vision.pintar(salida, mejor.to_square, VERDE, opacidad=0.35)
+
+        # Jugada detectada por visión: rojo
+        if propuesta is not None:
+            vision.pintar(salida, propuesta.from_square, AZUL, opacidad=0.35)
+            vision.pintar(salida, propuesta.to_square, MORADO, opacidad=0.35)
+
+        # Enviar la imagen con los cuadrados, pero sin texto
+        cam_virtual.send(salida)
+
+        # Vista local sin texto
+        cv2.imshow("Camara y jugadas", salida)
+        cv2.waitKey(1)
+
+
+except KeyboardInterrupt:
+    print("\nInterrupción recibida. Cerrando...")
+
 finally:
-    emisor.cerrar()
-    engine.quit()
-    cap.release()
+    print("Cerrando recursos...")
+
+    if cam_virtual is not None:
+        cam_virtual.close()
+
+    if cap is not None:
+        cap.release()
+
+    if engine is not None:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+
     cv2.destroyAllWindows()
-    cam_virtual.close()
+
+    print("Programa finalizado.")
