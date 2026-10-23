@@ -2,7 +2,7 @@ import cv2
 import json
 import numpy as np
 
-FUENTE = 2 # 0 o 2
+FUENTE = 3 # 0 o 2
 N_FRAMES = 30
 pattern = (7, 7)
 flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
@@ -25,8 +25,8 @@ def punto_casilla(file, rank, k, H, dx=0.5, dy=0.5):
 
 cap = cv2.VideoCapture(FUENTE, cv2.CAP_V4L2)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 muestras, H, rot = [], None, 0
 print("Fase 1: tablero vacío y visible. Fase 2: 'r' rota hasta que a1 esté bien, 's' guarda.")
