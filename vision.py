@@ -23,10 +23,26 @@ class VisionTablero:
             x, y = 8 - y, x
         return (x, y)
 
+
     def _matriz_warp(self):
-        R = np.array([[0, -1, 8], [1, 0, 0], [0, 0, 1]], dtype=float)
+        # Coordenadas de destino (vista cenital) -> coordenadas
+        # del tablero sin rotar -> píxeles de la cámara.
+        R = np.array(
+            [[0, -1, 8],
+            [1,  0, 0],
+            [0,  0, 1]],
+            dtype=np.float64,
+        )
+
         Rk = np.linalg.matrix_power(R, self.rot % 4)
-        return self.H @ Rk @ np.diag([1 / CELL, 1 / CELL, 1])
+
+        escala = np.diag([
+            1.0 / CELL,
+            1.0 / CELL,
+            1.0,
+        ])
+
+        return self.H @ Rk @ escala
 
     def poligono(self, sq):
         """4 esquinas de la casilla en píxeles de la cámara."""

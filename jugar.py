@@ -17,7 +17,7 @@ from vision import VisionTablero
 
 NOMBRE_CAMARA = "wed"      # texto a buscar en el nombre de la cámara
 TIEMPO_MOTOR = 0.3
-COLOR_ROBOT = chess.WHITE
+COLOR_ROBOT = chess.BLACK
 
 # True: la jugada detectada se juega directamente al pulsar Enter.
 # False: tras detectar hay que pulsar Enter otra vez para confirmar.
@@ -27,18 +27,18 @@ AUTOCONFIRMAR = True
 FRAMES_ESTABLE = 20
 UMBRAL_MOVIMIENTO = 2.0    # diferencia media de gris; sube si nunca se estabiliza
 
-VERDE = (0, 255, 0)
-AZUL = (255, 0, 0)
-ROJO = (0, 0, 255)
 MORADO = (255, 0, 255)
+AZUL = (255, 0, 0)
+ORIGEN = (255, 0, 0)
+DESTINO = (0, 255, 0)
 
 USAR_BOT_JAVA = False
 
 ANCHO = 640
 ALTO = 480
-FPS = 30
+FPS = 15
 
-DISPOSITIVO_VIRTUAL = "/dev/video20"
+DISPOSITIVO_VIRTUAL = "/dev/video0"
 
 
 # =========================
@@ -110,20 +110,13 @@ def nombre_color(color):
 
 def mostrar_ayuda():
     print("""
-FLUJO NORMAL (solo Enter):
-  - Turno del robot: cuando haya movido la pieza, pulsa Enter.
-  - Tu turno: mueve tu pieza, quita la mano y pulsa Enter.
-
-Otros comandos:
-  n  - Descartar la jugada detectada (si AUTOCONFIRMAR = False)
-  m  - Introducir una jugada manualmente (UCI, ej. e2e4)
-  u  - Deshacer la última jugada
-  x  - Reiniciar la partida
-  g  - Guardar a mano la imagen de referencia
-  e  - Mostrar el estado
-  h  - Ayuda
-  q  - Salir
-""")
+FLUJO NORMAL:
+  - Turno del robot: mueve la pieza físicamente y pulsa Enter.
+  - Tu turno:
+      1. Pulsa Enter para guardar la foto inicial.
+      2. Mueve tu pieza y retira la mano.
+      3. Pulsa Enter para detectar y registrar la jugada.
+    """)
 
 
 # =========================
@@ -171,14 +164,16 @@ S = SimpleNamespace(
     estable=False,
     quietos=0,
     limpio=None,
+    esperando_movimiento=False,
+
 )
 
 
 def nueva_posicion(guardar_referencia=True):
-    """Se llama tras cualquier cambio en el tablero."""
     S.propuesta = None
+    S.esperando_movimiento = False
     vision.antes = None
-    S.pendiente_antes = guardar_referencia
+    S.pendiente_antes = False
     S.mejor = calcular_jugada(engine, S.board)
 
     if S.board.is_game_over():
@@ -186,8 +181,8 @@ def nueva_posicion(guardar_referencia=True):
     elif S.mejor is not None:
         print(f"Robot: mueve {S.board.uci(S.mejor)} y pulsa Enter.")
     else:
-        print(f"Tu turno ({nombre_color(S.board.turn)}): mueve y pulsa Enter.")
-
+        print(f"Tu turno ({nombre_color(S.board.turn)}):")
+        print("Pulsa Enter para guardar la foto inicial.")
 
 def jugar(mv, etiqueta):
     san = S.board.san(mv)
@@ -233,26 +228,53 @@ def accion_enter():
         print(f"Partida terminada: {S.board.result()}")
         return
 
-    # Turno del robot: confirmar que ya ha movido
+    # Turno del robot: confirmar que ya ha movido físicamente.
     if S.board.turn == COLOR_ROBOT:
         if S.mejor is None or S.mejor not in S.board.legal_moves:
             S.mejor = calcular_jugada(engine, S.board)
             if S.mejor is None:
                 print("No hay jugada del robot disponible.")
                 return
+
         jugar(S.mejor, "Robot")
         return
 
-    # Turno humano
-    if S.propuesta is not None:
-        if S.propuesta in S.board.legal_moves:
-            jugar(S.propuesta, "Jugada confirmada")
-        else:
-            S.propuesta = None
-            print("La jugada detectada ya no es legal.")
+    # Turno humano: PRIMER ENTER = guardar posición anterior.
+    if not S.esperando_movimiento:
+        if not S.estable:
+            print("La imagen se mueve. Espera a que se estabilice y pulsa Enter.")
+            return
+
+        vision.guardar_antes(S.limpio.copy())
+        S.esperando_movimiento = True
+        S.propuesta = None
+
+        print("Foto inicial guardada.")
+        print("Ahora mueve tu pieza, retira la mano y pulsa Enter otra vez.")
         return
 
-    detectar_y_jugar()
+    # SEGUNDO ENTER = comparar con la posición posterior.
+    if not S.estable:
+        print("La imagen se mueve. Espera a que se estabilice y pulsa Enter otra vez.")
+        return
+
+    mv, confianza = vision.detectar(S.board, S.limpio.copy())
+
+    if mv is None:
+        print(f"No se pudo detectar la jugada: {confianza}")
+        print("Puedes volver a intentarlo pulsando Enter.")
+        return
+
+    if mv not in S.board.legal_moves:
+        print(f"La jugada detectada {mv.uci()} no es legal.")
+        return
+
+    if confianza is not None:
+        print(f"Confianza: {confianza}")
+
+    # Jugada detectada: actualizar tablero y preparar el siguiente turno.
+    S.esperando_movimiento = False
+    jugar(mv, "Jugada humana detectada")
 
 
 def procesar_comando(cmd, dato):
@@ -367,9 +389,6 @@ try:
             nueva_posicion()
 
         # Referencia "antes" automática en cuanto la imagen es estable
-        if S.pendiente_antes and S.estable:
-            vision.guardar_antes(S.limpio.copy())
-            S.pendiente_antes = False
 
         # --- Comandos pendientes ---
         while True:
@@ -391,8 +410,8 @@ try:
         salida = S.limpio.copy()
 
         if S.mejor is not None:
-            vision.pintar(salida, S.mejor.from_square, ROJO, opacidad=0.35)
-            vision.pintar(salida, S.mejor.to_square, VERDE, opacidad=0.35)
+            vision.pintar(salida, S.mejor.from_square, ORIGEN, opacidad=0.35)
+            vision.pintar(salida, S.mejor.to_square, DESTINO, opacidad=0.35)
 
         if S.propuesta is not None:
             vision.pintar(salida, S.propuesta.from_square, AZUL, opacidad=0.35)
