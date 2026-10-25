@@ -29,7 +29,7 @@ UMBRAL_MOVIMIENTO = 2.0    # diferencia media de gris; sube si nunca se estabili
 
 MORADO = (255, 0, 255)
 AZUL = (255, 0, 0)
-ORIGEN = (255, 0, 0)
+ORIGEN = (0, 0, 255)
 DESTINO = (0, 255, 0)
 
 USAR_BOT_JAVA = False
@@ -410,8 +410,8 @@ try:
         salida = S.limpio.copy()
 
         if S.mejor is not None:
-            vision.pintar(salida, S.mejor.from_square, ORIGEN, opacidad=0.35)
-            vision.pintar(salida, S.mejor.to_square, DESTINO, opacidad=0.35)
+            vision.pintar(salida, S.mejor.from_square, ORIGEN, opacidad=0.15)
+            vision.pintar(salida, S.mejor.to_square, DESTINO, opacidad=0.15)
 
         if S.propuesta is not None:
             vision.pintar(salida, S.propuesta.from_square, AZUL, opacidad=0.35)
